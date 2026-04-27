@@ -1,0 +1,19 @@
+{
+  "name": "ff-node-demo",
+  "version": "1.0.0",
+  "scripts": {
+    "start": "node --require dd-trace/init src/index.js",
+    "build": "tsc",
+    "dev": "tsc && node --require dd-trace/init src/index.js"
+  },
+  "dependencies": {
+    "dd-trace": "^5.26.0",
+    "@openfeature/server-sdk": "^1.15.0",
+    "express": "^4.21.0"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.0",
+    "@types/node": "^20.0.0",
+    "typescript": "^5.6.0"
+  }
+}

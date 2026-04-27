@@ -1,0 +1,40 @@
+plugins {
+    id 'java'
+    id 'org.springframework.boot' version '3.3.5'
+    id 'io.spring.dependency-management' version '1.1.6'
+}
+
+group = 'com.example'
+version = '1.0.0'
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(17)
+    }
+}
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    implementation 'org.springframework.boot:spring-boot-starter-web'
+    implementation 'dev.openfeature:sdk:1.12.0'
+    implementation 'com.datadoghq:dd-trace-api:1.41.0'
+}
+
+tasks.named('test') {
+    useJUnitPlatform()
+}
+
+task downloadAgent(type: Copy) {
+    from configurations.create('ddAgent') {
+        dependencies.add(project.dependencies.create('com.datadoghq:dd-java-agent:1.41.0'))
+    }
+    into "$buildDir/agent"
+    rename { 'dd-java-agent.jar' }
+}
+
+bootJar {
+    dependsOn downloadAgent
+}

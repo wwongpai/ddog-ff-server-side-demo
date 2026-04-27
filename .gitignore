@@ -1,0 +1,26 @@
+# Credentials
+.env
+
+# Java
+java-springboot/build/
+java-springboot/.gradle/
+java-springboot/bin/
+*.class
+*.jar
+
+# Node.js
+nodejs-bun/node_modules/
+nodejs-bun/dist/
+nodejs-bun/bun.lockb
+nodejs-bun/package-lock.json
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Docker
+.server.log
+.server.pid
