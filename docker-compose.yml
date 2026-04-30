@@ -1,24 +1,29 @@
-version: "3.8"
-
 services:
   datadog-agent:
     image: gcr.io/datadoghq/agent:latest
     container_name: dd-agent
+    pid: host
     environment:
       - DD_API_KEY=${DD_API_KEY}
       - DD_SITE=${DD_SITE:-datadoghq.com}
-      - DD_ENV=${DD_ENV:-ff-demo}
+      - DD_ENV=${DD_ENV:-production}
       - DD_APM_ENABLED=true
       - DD_APM_NON_LOCAL_TRAFFIC=true
+      - DD_APM_DD_URL=https://trace.agent.datadoghq.com
+      - DD_APM_MAX_TPS=1000
+      - DD_APM_ERROR_TPS=1000
       - DD_REMOTE_CONFIGURATION_ENABLED=true
       - DD_REMOTE_CONFIG_ENABLED=true
+      - DD_OTLP_CONFIG_RECEIVER_PROTOCOLS_HTTP_ENDPOINT=0.0.0.0:4318
+      - DD_OTLP_CONFIG_DEBUG_VERBOSITY=detailed
     volumes:
-      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ${DOCKER_HOST_SOCK:-/var/run/docker.sock}:/var/run/docker.sock:ro
       - /proc/:/host/proc/:ro
       - /sys/fs/cgroup/:/host/sys/fs/cgroup:ro
     ports:
       - "8126:8126"
       - "8125:8125/udp"
+      - "4318:4318"
     healthcheck:
       test: ["CMD", "agent", "health"]
       interval: 10s
@@ -30,10 +35,13 @@ services:
     container_name: ff-java-app
     environment:
       - DD_AGENT_HOST=datadog-agent
-      - DD_ENV=${DD_ENV:-ff-demo}
+      - DD_ENV=${DD_ENV:-production}
       - DD_SERVICE=ff-java-demo
       - DD_VERSION=1.0.0
       - DD_TRACE_SAMPLE_RATE=1.0
+      - DD_EXPERIMENTAL_FLAGGING_PROVIDER_ENABLED=true
+      - DD_REMOTE_CONFIG_ENABLED=true
+      - DD_METRICS_OTEL_ENABLED=true
     ports:
       - "8080:8080"
     depends_on:
@@ -45,10 +53,13 @@ services:
     container_name: ff-node-app
     environment:
       - DD_AGENT_HOST=datadog-agent
-      - DD_ENV=${DD_ENV:-ff-demo}
+      - DD_ENV=${DD_ENV:-production}
       - DD_SERVICE=ff-node-demo
       - DD_VERSION=1.0.0
       - DD_TRACE_SAMPLE_RATE=1.0
+      - DD_EXPERIMENTAL_FLAGGING_PROVIDER_ENABLED=true
+      - DD_REMOTE_CONFIG_ENABLED=true
+      - DD_METRICS_OTEL_ENABLED=true
     ports:
       - "3000:3000"
     depends_on:

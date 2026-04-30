@@ -19,8 +19,11 @@ repositories {
 
 dependencies {
     implementation 'org.springframework.boot:spring-boot-starter-web'
-    implementation 'dev.openfeature:sdk:1.12.0'
-    implementation 'com.datadoghq:dd-trace-api:1.41.0'
+    implementation 'dev.openfeature:sdk:1.20.1'
+    implementation 'com.datadoghq:dd-trace-api:1.61.1'
+    implementation 'com.datadoghq:dd-openfeature:1.61.1'
+    implementation 'io.opentracing:opentracing-api:0.33.0'
+    implementation 'io.opentracing:opentracing-util:0.33.0'
 }
 
 tasks.named('test') {
@@ -29,7 +32,7 @@ tasks.named('test') {
 
 task downloadAgent(type: Copy) {
     from configurations.create('ddAgent') {
-        dependencies.add(project.dependencies.create('com.datadoghq:dd-java-agent:1.41.0'))
+        dependencies.add(project.dependencies.create('com.datadoghq:dd-java-agent:1.61.1'))
     }
     into "$buildDir/agent"
     rename { 'dd-java-agent.jar' }

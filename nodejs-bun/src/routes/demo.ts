@@ -1,5 +1,6 @@
 import { Router } from "express";
 import { OpenFeature } from "@openfeature/server-sdk";
+import tracer from "dd-trace";
 
 export const demoRouter = Router();
 
@@ -7,10 +8,19 @@ function getClient() {
   return OpenFeature.getClient("ff-node-demo");
 }
 
+function trackFlag(flagKey: string, variant: string) {
+  const span = tracer.scope().active();
+  if (span) {
+    span.setTag(`_dd.feature_flags.${flagKey}.variant`, variant);
+    span.setTag(`ff.${flagKey}`, variant);
+  }
+}
+
 // ── Q1: Basic flag check — no restart needed ──────────────────────────
 demoRouter.get("/health", async (_req, res) => {
   const client = getClient();
   const brightMode = await client.getBooleanValue("bright_mode", false);
+  trackFlag("bright_mode", brightMode ? "on" : "off");
   res.json({
     status: "ok",
     bright_mode: brightMode,
@@ -22,6 +32,7 @@ demoRouter.get("/health", async (_req, res) => {
 demoRouter.get("/theme", async (_req, res) => {
   const client = getClient();
   const details = await client.getBooleanDetails("bright_mode", false);
+  trackFlag("bright_mode", details.variant || (details.value ? "on" : "off"));
   res.json({
     bright_mode: details.value,
     variant: details.variant,
@@ -40,6 +51,7 @@ demoRouter.post("/checkout", async (req, res) => {
   const ctx = { targetingKey: userId || "anonymous", plan: plan || "basic" };
 
   const newCheckout = await client.getBooleanValue("new_checkout", false, ctx);
+  trackFlag("new_checkout", newCheckout ? "enabled" : "disabled");
 
   console.log(
     `[Q2] user=${ctx.targetingKey} plan=${ctx.plan} new_checkout=${newCheckout}`
@@ -57,11 +69,13 @@ demoRouter.post("/checkout", async (req, res) => {
 demoRouter.get("/features", async (_req, res) => {
   const client = getClient();
   const featureA = await client.getBooleanValue("feature_a", false);
+  trackFlag("feature_a", featureA ? "on" : "off");
   let featureB = false;
   let chain = "feature_a=OFF → feature_b skipped";
 
   if (featureA) {
     featureB = await client.getBooleanValue("feature_b", false);
+    trackFlag("feature_b", featureB ? "on" : "off");
     chain = `feature_a=ON → feature_b=${featureB ? "ON" : "OFF"}`;
   }
 
@@ -84,6 +98,7 @@ demoRouter.get("/promotions", async (req, res) => {
     false,
     ctx
   );
+  trackFlag("bangkok_promo", bangkokPromo ? "on" : "off");
 
   res.json({
     city,
@@ -154,35 +169,7 @@ demoRouter.get("/cart", async (_req, res) => {
   });
 });
 
-// ── Q9: A/B test with string variant ─────────────────────────────────
-demoRouter.post("/ab-test", async (req, res) => {
-  const client = getClient();
-  const userId = req.body.userId || "anonymous";
-  const ctx = { targetingKey: userId };
-
-  const details = await client.getStringDetails(
-    "checkout_variant",
-    "control",
-    ctx
-  );
-  const variant = details.value;
-
-  const experiences: Record<string, { layout: string; cta: string }> = {
-    treatment_a: { layout: "single_page", cta: "Buy Now" },
-    treatment_b: { layout: "multi_step", cta: "Continue to Payment" },
-    control: { layout: "classic", cta: "Proceed to Checkout" },
-  };
-
-  res.json({
-    userId,
-    variant,
-    reason: details.reason,
-    experience: experiences[variant] || experiences.control,
-    note: "String flag for A/B testing — same user always gets same variant (Q9)",
-  });
-});
-
-// ── Q10: Context from headers vs body ────────────────────────────────
+// ── Q8: Context from headers vs body ────────────────────────────────
 demoRouter.get("/context-demo", async (req, res) => {
   const client = getClient();
 
@@ -215,6 +202,6 @@ demoRouter.get("/context-demo", async (req, res) => {
       tier: paramCtx.tier,
       bright_mode: paramResult,
     },
-    note: "Context can come from headers, query params, body — it's up to the app (Q10)",
+    note: "Context can come from headers, query params, body — it's up to the app (Q8)",
   });
 });

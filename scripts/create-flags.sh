@@ -123,14 +123,14 @@ create_flag "bangkok_promo" '{
   }
 }'
 
-# ── checkout_variant (String) — Q9 A/B test ──────────────────────────
+# ── checkout_variant (String) — used in Q5 audit demo ─────────────────
 create_flag "checkout_variant" '{
   "data": {
     "type": "feature-flags",
     "attributes": {
       "key": "checkout_variant",
       "name": "Checkout Variant",
-      "description": "A/B test with three variants — control, treatment_a, treatment_b (Q9)",
+      "description": "String flag with three variants — used in Q5 audit demo",
       "value_type": "STRING",
       "default_variant_key": "control",
       "variants": [

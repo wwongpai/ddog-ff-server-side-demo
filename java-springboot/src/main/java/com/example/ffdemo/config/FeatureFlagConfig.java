@@ -2,7 +2,8 @@ package com.example.ffdemo.config;
 
 import dev.openfeature.sdk.OpenFeatureAPI;
 import dev.openfeature.sdk.Client;
-import dev.openfeature.sdk.FeatureProvider;
+import dev.openfeature.sdk.exceptions.ProviderNotReadyError;
+import datadog.trace.api.openfeature.Provider;
 import jakarta.annotation.PostConstruct;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -18,10 +19,6 @@ public class FeatureFlagConfig {
     public void init() {
         OpenFeatureAPI api = OpenFeatureAPI.getInstance();
 
-        // The Datadog dd-java-agent automatically registers as the OpenFeature provider
-        // when running with -javaagent:dd-java-agent.jar and Remote Config is enabled.
-        // The provider is set via dd-trace-java's internal OpenFeature integration.
-
         api.onProviderConfigurationChanged(event -> {
             log.info("[Q1] Provider configuration changed — flags updated without restart. "
                     + "Flags changed: {}", event.getFlagsChanged());
@@ -35,7 +32,16 @@ public class FeatureFlagConfig {
             log.info("OpenFeature provider is READY");
         });
 
-        log.info("OpenFeature configured — waiting for Datadog provider via dd-java-agent");
+        try {
+            api.setProviderAndWait(new Provider());
+            log.info("Datadog OpenFeature provider initialized successfully");
+        } catch (ProviderNotReadyError e) {
+            log.warn("Provider not ready yet, will use defaults until config arrives: {}", e.getMessage());
+            api.setProvider(new Provider());
+        } catch (Exception e) {
+            log.error("Failed to initialize OpenFeature provider", e);
+            api.setProvider(new Provider());
+        }
     }
 
     @Bean

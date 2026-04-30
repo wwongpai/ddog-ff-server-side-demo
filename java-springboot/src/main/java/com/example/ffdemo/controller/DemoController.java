@@ -1,6 +1,8 @@
 package com.example.ffdemo.controller;
 
 import com.example.ffdemo.model.CheckoutRequest;
+import io.opentracing.Span;
+import io.opentracing.util.GlobalTracer;
 import dev.openfeature.sdk.Client;
 import dev.openfeature.sdk.FlagEvaluationDetails;
 import dev.openfeature.sdk.MutableContext;
@@ -22,10 +24,19 @@ public class DemoController {
         this.client = client;
     }
 
+    private void trackFlag(String flagKey, String variant) {
+        Span span = GlobalTracer.get().activeSpan();
+        if (span != null) {
+            span.setTag("_dd.feature_flags." + flagKey + ".variant", variant);
+            span.setTag("ff." + flagKey, variant);
+        }
+    }
+
     // ── Q1: Basic flag check — no restart needed ──────────────────────
     @GetMapping("/health")
     public Map<String, Object> health() {
         boolean brightMode = client.getBooleanValue("bright_mode", false);
+        trackFlag("bright_mode", brightMode ? "on" : "off");
         Map<String, Object> res = new HashMap<>();
         res.put("status", "ok");
         res.put("bright_mode", brightMode);
@@ -37,6 +48,7 @@ public class DemoController {
     @GetMapping("/theme")
     public Map<String, Object> theme() {
         FlagEvaluationDetails<Boolean> details = client.getBooleanDetails("bright_mode", false);
+        trackFlag("bright_mode", details.getVariant() != null ? details.getVariant() : (details.getValue() ? "on" : "off"));
         Map<String, Object> res = new HashMap<>();
         res.put("bright_mode", details.getValue());
         res.put("variant", details.getVariant());
@@ -55,6 +67,7 @@ public class DemoController {
         ctx.add("plan", req.getPlan());
 
         boolean newCheckout = client.getBooleanValue("new_checkout", false, ctx);
+        trackFlag("new_checkout", newCheckout ? "enabled" : "disabled");
 
         log.info("[Q2] user={} plan={} new_checkout={} — sticky per targetingKey",
                 req.getUserId(), req.getPlan(), newCheckout);
@@ -71,11 +84,13 @@ public class DemoController {
     @GetMapping("/features")
     public Map<String, Object> features() {
         boolean featureA = client.getBooleanValue("feature_a", false);
+        trackFlag("feature_a", featureA ? "on" : "off");
         boolean featureB = false;
         String chain = "feature_a=OFF → feature_b skipped";
 
         if (featureA) {
             featureB = client.getBooleanValue("feature_b", false);
+            trackFlag("feature_b", featureB ? "on" : "off");
             chain = "feature_a=ON → feature_b=" + (featureB ? "ON" : "OFF");
         }
 
@@ -98,6 +113,7 @@ public class DemoController {
         ctx.add("country", country);
 
         boolean bangkokPromo = client.getBooleanValue("bangkok_promo", false, ctx);
+        trackFlag("bangkok_promo", bangkokPromo ? "on" : "off");
 
         Map<String, Object> res = new HashMap<>();
         res.put("city", city);
@@ -167,40 +183,7 @@ public class DemoController {
         return res;
     }
 
-    // ── Q9: A/B test with string variant ─────────────────────────────
-    @PostMapping("/ab-test")
-    public Map<String, Object> abTest(@RequestBody Map<String, String> body) {
-        String userId = body.getOrDefault("userId", "anonymous");
-        MutableContext ctx = new MutableContext(userId);
-
-        FlagEvaluationDetails<String> details = client.getStringDetails("checkout_variant", "control", ctx);
-
-        String variant = details.getValue();
-        Map<String, Object> experience = new HashMap<>();
-        switch (variant) {
-            case "treatment_a":
-                experience.put("layout", "single_page");
-                experience.put("cta", "Buy Now");
-                break;
-            case "treatment_b":
-                experience.put("layout", "multi_step");
-                experience.put("cta", "Continue to Payment");
-                break;
-            default:
-                experience.put("layout", "classic");
-                experience.put("cta", "Proceed to Checkout");
-        }
-
-        Map<String, Object> res = new HashMap<>();
-        res.put("userId", userId);
-        res.put("variant", variant);
-        res.put("reason", details.getReason());
-        res.put("experience", experience);
-        res.put("note", "String flag for A/B testing — same user always gets same variant (Q9)");
-        return res;
-    }
-
-    // ── Q10: Context from headers vs body ────────────────────────────
+    // ── Q8: Context from headers vs body ────────────────────────────
     @GetMapping("/context-demo")
     public Map<String, Object> contextDemo(
             @RequestHeader(value = "X-User-Id", defaultValue = "header-user") String headerUserId,
@@ -232,7 +215,7 @@ public class DemoController {
         Map<String, Object> res = new HashMap<>();
         res.put("from_headers", headerInfo);
         res.put("from_query_params", paramInfo);
-        res.put("note", "Context can come from headers, query params, body — it's up to the app (Q10)");
+        res.put("note", "Context can come from headers, query params, body — it's up to the app (Q8)");
         return res;
     }
 }

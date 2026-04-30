@@ -1,6 +1,12 @@
 # Server-Side Datadog Feature Flags Demo
 
-Two identical demo apps — **Java Spring Boot** and **Node.js (Express)** — showing server-side feature flag evaluation with the Datadog OpenFeature provider. Each endpoint maps to a specific Q&A question (Q1–Q10).
+Two identical demo apps — **Java Spring Boot** and **Node.js (Express)** — showing server-side feature flag evaluation with the Datadog OpenFeature provider. Each endpoint maps to a specific Q&A question (Q1–Q8).
+
+Both apps instrument flag evaluations for observability via:
+- **APM span tags** (`ff.<flag_key>`) on every trace, enabling variant-level filtering in APM Trace Explorer
+- **`feature_flag.evaluations` OTel counter metric** (Node.js with `dd-trace ≥ 5.99.0`), enabling metric-based dashboards
+
+> **Custom Dashboard:** This demo includes a custom Datadog dashboard that combines both data sources to visualize flag variant distribution, evaluation counts, and cross-service comparisons. See [Observability & Dashboard Setup](#observability--dashboard-setup) below.
 
 ## Prerequisites
 
@@ -36,7 +42,7 @@ docker-compose up --build
 ```
 
 This starts:
-- **Datadog Agent** on port 8126 (APM) / 8125 (DogStatsD)
+- **Datadog Agent** on port 8126 (APM) / 8125 (DogStatsD) / 4318 (OTLP)
 - **Java app** on port **8080**
 - **Node.js app** on port **3000**
 
@@ -45,6 +51,90 @@ This starts:
 Use the curl examples below. Both apps expose the same endpoints — just swap the port:
 - Java: `http://localhost:8080/api/...`
 - Node.js: `http://localhost:3000/api/...`
+
+---
+
+## Server-Side Feature Flag Configuration
+
+> Reference: [Datadog docs — Server-Side Feature Flags](https://docs.datadoghq.com/feature_flags/server#application-configuration)
+
+Server-side feature flags require specific environment variables on the **application** (not the Agent):
+
+```bash
+# Enable Remote Configuration so the Agent can push flag updates
+DD_REMOTE_CONFIG_ENABLED=true
+
+# Enable the feature flagging provider (required for most SDKs)
+DD_EXPERIMENTAL_FLAGGING_PROVIDER_ENABLED=true
+
+# Enable flag evaluation metrics (required for flag evaluation tracking)
+DD_METRICS_OTEL_ENABLED=true
+```
+
+| Variable | Purpose | Notes |
+|---|---|---|
+| `DD_REMOTE_CONFIG_ENABLED=true` | Allows the Agent to stream flag configuration changes to the app | Also set on the Agent side via `DD_REMOTE_CONFIGURATION_ENABLED=true` |
+| `DD_EXPERIMENTAL_FLAGGING_PROVIDER_ENABLED=true` | Activates the Datadog OpenFeature provider inside the tracer | Java also supports `-Ddd.experimental.flagging.provider.enabled=true`. Node.js and Ruby support code-based config as an alternative. |
+| `DD_METRICS_OTEL_ENABLED=true` | Emits `feature_flag.evaluations` OTel counter metric on each evaluation | Tagged with flag key, result variant, and evaluation reason. Without this, the SDK does not emit evaluation metrics. |
+
+### What works today vs. what's experimental
+
+| Capability | Status | Details |
+|---|---|---|
+| Flag evaluation via OpenFeature SDK | **GA** | Both Java and Node.js providers are stable |
+| Real-time flag updates via Remote Config | **GA** | No restart required when flags change |
+| APM span tags for flag evaluations | **Manual** | This demo manually tags spans with `ff.<flag_key>` for searchability in APM Trace Explorer. The built-in `_dd.feature_flags.*` tags are set by the provider but are not indexed for facet search by default. |
+| `feature_flag.evaluations` OTel metric | **Experimental** | Requires `DD_METRICS_OTEL_ENABLED=true`. Available in `dd-trace-js ≥ 5.99.0`. Java support is pending a future `dd-java-agent` release. |
+| Feature Flags UI — Real-Time Metric Overview | **Depends on OTel metric** | The dedicated Feature Flags UI panel relies on the `feature_flag.evaluations` metric. It populates automatically once the metric is flowing. |
+
+---
+
+## Observability & Dashboard Setup
+
+This demo uses two complementary approaches to observe flag evaluations:
+
+### 1. APM Span Tags (both Java and Node.js)
+
+Every flag evaluation is tagged on the active APM span:
+
+```
+ff.bright_mode = "on"
+ff.new_checkout = "enabled"
+_dd.feature_flags.bright_mode.variant = "on"
+```
+
+The `ff.*` tags are custom tags added by the `trackFlag()` helper in both apps. They can be used as facets in APM Trace Explorer:
+
+```
+@ff.bright_mode:on service:ff-java-demo
+```
+
+### 2. OTel Metrics (Node.js only, currently)
+
+With `DD_METRICS_OTEL_ENABLED=true`, the Node.js tracer (`dd-trace ≥ 5.99.0`) emits:
+
+```
+feature_flag.evaluations{
+  flag_key: "bright_mode",
+  variant: "on",
+  reason: "TARGETING_MATCH"
+}
+```
+
+This counter metric can be queried in Metrics Explorer and used in dashboard widgets.
+
+### Custom Dashboard
+
+Create a dashboard with widgets that combine both data sources:
+
+| Widget Type | Data Source | Example Query |
+|---|---|---|
+| Timeseries (Node.js) | `feature_flag.evaluations` metric | `sum:feature_flag.evaluations{flag_key:bright_mode} by {variant}.as_count()` |
+| Timeseries (Java) | APM span tag analytics | `count(*) by ff.bright_mode` on `trace-search` for `service:ff-java-demo` |
+| Top List | Either source | Top variants by count for a given flag |
+| Query Value | Either source | Total evaluations in a time window |
+
+> **Tip:** Build separate widget groups per scenario (Q1, Q2, Q3, Q4) so you can compare variant distributions after each test.
 
 ---
 
@@ -57,12 +147,11 @@ Use the curl examples below. Both apps expose the same endpoints — just swap t
 | `feature_a` | Boolean | on / off | Chain demo part 1 (Q3) |
 | `feature_b` | Boolean | on / off | Chain demo part 2 (Q3) |
 | `bangkok_promo` | Boolean | on / off | Geo targeting (Q4) |
-| `checkout_variant` | String | control / treatment_a / treatment_b | A/B test (Q9) |
 | `max_cart_items` | Number | default (20) / high (50) | Number flag (Q7) |
 
 ---
 
-## Endpoint Walkthrough (Q1–Q10)
+## Endpoint Walkthrough (Q1–Q8)
 
 ### Q1: Do flag changes require a restart?
 
@@ -91,10 +180,17 @@ The `/api/theme` endpoint returns richer details including the variant name and 
 curl http://localhost:8080/api/theme
 ```
 
-**What to look for in the response:**
-- `bright_mode: true/false` — the evaluated value
-- `variant: "on"` or `"off"` — which variant was selected
-- `reason: "TARGETING_MATCH"` — why this variant was chosen (e.g., targeting rule matched, default used, error fallback)
+**Dashboard & expected results:**
+
+| Step | Action | Expected `bright_mode` | Dashboard Signal |
+|---|---|---|---|
+| 1 | Initial curl (default) | `false` | `ff.bright_mode:off` span tag; `variant:off` in OTel metric |
+| 2 | Toggle ON in UI | — | — |
+| 3 | Curl after toggle | `true` | `ff.bright_mode:on` span tag; `variant:on` in OTel metric |
+| 4 | Toggle OFF in UI | — | — |
+| 5 | Curl after toggle | `false` | `ff.bright_mode:off` — variant distribution shifts visible in dashboard timeseries |
+
+After running several curls with different flag states, the dashboard timeseries shows the variant distribution changing over time. APM Trace Explorer shows individual traces tagged with the variant received.
 
 ---
 
@@ -105,9 +201,9 @@ curl http://localhost:8080/api/theme
 **How it works:** When you pass a `targetingKey` (e.g., a user ID like `"user-42"`) in the evaluation context, the Datadog provider uses consistent hashing to map that key to a variant. This means:
 - `user-42` will **always** get the same variant (e.g., `enabled`) no matter how many times the flag is evaluated.
 - `user-99` might get a different variant, but it will also be **stable** across repeated evaluations.
-- This is deterministic — no session storage, cookies, or databases are needed. The hash of the targeting key alone decides the variant.
+- This is deterministic — no session storage, cookies, or databases are needed.
 
-**Why this matters:** For gradual rollouts and experiments, you need users to have a consistent experience. Without stickiness, a user could see the new checkout flow on one request and the old one on the next, which creates confusion and corrupts experiment data.
+**Why this matters:** For gradual rollouts and experiments, you need users to have a consistent experience. Without stickiness, a user could see the new checkout flow on one request and the old one on the next.
 
 **Try it yourself:**
 
@@ -123,10 +219,15 @@ curl -X POST http://localhost:8080/api/checkout \
   -d '{"userId": "user-99", "plan": "basic"}'
 ```
 
-**What to look for in the response:**
-- `flow: "new_checkout_v2"` or `"legacy_checkout"` — which experience the user gets
-- Run the same userId multiple times — the result never changes
-- Try many different userIds to see the distribution across variants
+**Dashboard & expected results:**
+
+| User | Repeated Calls | Expected `new_checkout` | Dashboard Signal |
+|---|---|---|---|
+| `user-42` | 5x | Same variant every time (e.g., `enabled`) | All 5 traces show `ff.new_checkout:enabled` |
+| `user-99` | 5x | Same variant every time (may differ from user-42) | All 5 traces show consistent variant |
+| `user-1` through `user-20` | 1x each | ~50/50 split (with 50% rollout) | Dashboard pie/bar chart shows variant distribution |
+
+The dashboard's "new_checkout variant distribution" widget should show a roughly even split when you test with many different user IDs and a 50% rollout is configured.
 
 ---
 
@@ -134,7 +235,7 @@ curl -X POST http://localhost:8080/api/checkout \
 
 > **Short answer:** Yes. Your application code evaluates flags in sequence, so you can gate one flag behind another.
 
-**How it works:** This is not a built-in platform feature — it's an application-level pattern. The code first evaluates `feature_a`. Only if `feature_a` is ON does it proceed to evaluate `feature_b`. If `feature_a` is OFF, `feature_b` is never even checked, saving an unnecessary evaluation and making the dependency explicit.
+**How it works:** This is an application-level pattern, not a built-in platform feature. The code first evaluates `feature_a`. Only if `feature_a` is ON does it proceed to evaluate `feature_b`. If `feature_a` is OFF, `feature_b` is never even checked.
 
 ```
 if feature_a == ON:
@@ -143,36 +244,40 @@ else:
     skip feature_b entirely
 ```
 
-**Why this matters:** In complex systems, features often have prerequisites. For example, you might have a "redesigned dashboard" flag that should only take effect if the "new navigation" flag is also enabled. Chaining prevents nonsensical combinations (e.g., new dashboard with old nav) and gives you fine-grained rollout control.
+**Why this matters:** In complex systems, features often have prerequisites. For example, you might have a "redesigned dashboard" flag that should only take effect if the "new navigation" flag is also enabled. Chaining prevents nonsensical combinations and gives you fine-grained rollout control.
 
 **Try it yourself:**
 
 ```bash
-# With both flags OFF (default), feature_b is skipped entirely
+# Scenario 1: Both flags OFF (default)
 curl http://localhost:8080/api/features
 
-# Now go to Datadog UI → turn ON feature_a only
+# Scenario 2: Turn ON feature_a only (in Datadog UI)
 curl http://localhost:8080/api/features
-# feature_a=ON, feature_b=OFF (b is now evaluated but still off)
 
-# Now also turn ON feature_b
+# Scenario 3: Turn ON both feature_a and feature_b
 curl http://localhost:8080/api/features
-# feature_a=ON, feature_b=ON (both active)
 ```
 
-**What to look for in the response:**
-- `chain` field shows the evaluation flow in plain text (e.g., `"feature_a=OFF → feature_b skipped"`)
-- When `feature_a` is OFF, `feature_b` always shows `false` regardless of its actual configuration in Datadog
+**Dashboard & expected results:**
+
+| Scenario | `feature_a` | `feature_b` | Chain | Dashboard Signal |
+|---|---|---|---|---|
+| 1: Both OFF | `false` | `false` (skipped) | `feature_a=OFF → feature_b skipped` | Only `ff.feature_a:off` tag; no `ff.feature_b` tag on span |
+| 2: A=ON, B=OFF | `true` | `false` | `feature_a=ON → feature_b=OFF` | Both `ff.feature_a:on` and `ff.feature_b:off` tags |
+| 3: Both ON | `true` | `true` | `feature_a=ON → feature_b=ON` | Both `ff.feature_a:on` and `ff.feature_b:on` tags |
+
+The dashboard's chained evaluation widgets show `feature_a` and `feature_b` variant counts side by side. When `feature_a` is OFF, the `feature_b` evaluation count drops to zero — visually confirming the gating behavior.
 
 ---
 
 ### Q4: How does geographic targeting work?
 
-> **Short answer:** Your app passes user attributes (city, country, region, etc.) as part of the evaluation context. You then configure targeting rules in the Datadog UI to match on those attributes.
+> **Short answer:** Your app passes user attributes (city, country, etc.) as part of the evaluation context. You then configure targeting rules in the Datadog UI to match on those attributes.
 
-**How it works:** The server-side application extracts location information from the request — this could come from HTTP headers (set by a CDN/load balancer), IP geolocation, user profile data, or any other source. These attributes are passed to the OpenFeature evaluation context. In the Datadog Feature Flags UI, you create targeting rules like "IF city == Bangkok THEN serve variant ON". The provider evaluates these rules locally using the context you provide.
+**How it works:** The server-side application extracts location information from the request — this could come from HTTP headers (set by a CDN/load balancer), IP geolocation, user profile data, or any other source. These attributes are passed to the OpenFeature evaluation context. In the Datadog Feature Flags UI, you create targeting rules like "IF city == Bangkok THEN serve variant ON".
 
-**Why this matters:** Geographic targeting lets you roll out features region by region (e.g., launch a promotion only in Bangkok), comply with regional regulations (e.g., different checkout flows for EU vs US), or run location-specific experiments. Since the targeting happens server-side, it works regardless of VPNs or client-side spoofing.
+**Why this matters:** Geographic targeting lets you roll out features region by region, comply with regional regulations, or run location-specific experiments. Since the targeting happens server-side, it works regardless of VPNs or client-side spoofing.
 
 **Try it yourself:**
 
@@ -191,42 +296,52 @@ curl http://localhost:8080/api/promotions \
   -H "X-User-Country: UK"
 ```
 
-> **Note:** You must configure the targeting rule in the Datadog Feature Flags UI for `bangkok_promo` to match on the `city` attribute. Without a targeting rule, the flag will return its default variant regardless of the context attributes.
+> **Note:** You must configure a targeting rule in the Datadog Feature Flags UI for `bangkok_promo` to match on the `city` attribute. Without a targeting rule, the flag returns its default variant regardless of the context.
 
-**What to look for in the response:**
-- `bangkok_promo: true` when city=Bangkok (if targeting rule is configured)
-- `bangkok_promo: false` for other cities or when no headers are sent
-- `city` and `country` echoed back so you can verify what the server received
+**Dashboard & expected results:**
+
+| Request | `city` | `bangkok_promo` | Dashboard Signal |
+|---|---|---|---|
+| With Bangkok header | Bangkok | `true` | `ff.bangkok_promo:on` in trace; `variant:on` in OTel metric |
+| No headers | unknown | `false` | `ff.bangkok_promo:off` |
+| With London header | London | `false` | `ff.bangkok_promo:off` |
+
+The dashboard's geo-targeting widgets show the variant split. When all traffic includes `X-User-City: Bangkok`, the chart shows 100% `on`. Mixed traffic shows the split by city.
 
 ---
 
-### Q5: Can I audit which flags a user sees?
+### Q5: Can I audit which flags a user sees and how they impact performance?
 
-> **Short answer:** Yes. The OpenFeature SDK's `getDetails()` method returns the full evaluation result — not just the value, but also which variant was selected, why it was selected, and any errors.
+> **Short answer:** Yes — through (1) **APM traces** with flag evaluation tags, (2) the **`feature_flag.evaluations` OTel metric**, (3) **custom dashboards** correlating variants with performance, and (4) **SDK-level `getDetails()`** for per-request audit.
 
-**How it works:** Instead of calling `getBooleanValue()` (which returns only `true`/`false`), you call `getBooleanDetails()` or `getStringDetails()`. This returns an `EvaluationDetails` object containing:
-- **value** — the resolved flag value
-- **variant** — which named variant was selected (e.g., `"on"`, `"treatment_a"`)
-- **reason** — why this variant was chosen (e.g., `"TARGETING_MATCH"`, `"DEFAULT"`, `"ERROR"`)
-- **errorCode** — if evaluation failed, what went wrong (e.g., `"FLAG_NOT_FOUND"`, `"PROVIDER_NOT_READY"`)
+**How it works:** For server-side feature flags, every flag evaluation is observable through the Datadog platform at multiple levels:
 
-**Why this matters:** For compliance, debugging, and experiment analysis, you need to know exactly what each user saw and why. This audit data can be logged, sent to analytics, or stored for regulatory requirements. It's especially useful when troubleshooting why a specific user is (or isn't) seeing a feature.
+| Layer | What You See | Where |
+|---|---|---|
+| **APM Traces** | Each request's span is tagged with the flag variant it received (e.g., `ff.bright_mode:on`) | APM → Trace Explorer → filter by `@ff.<flag_key>:<variant>` |
+| **OTel Metrics** | `feature_flag.evaluations` counter broken down by flag key, variant, and reason | Metrics Explorer → `feature_flag.evaluations` |
+| **Custom Dashboards** | Cross-flag, cross-service views combining metrics and span analytics | Your custom dashboard |
+| **Feature Flags UI** | Variant distribution, evaluation count, error rate per flag (once OTel metric flows) | Feature Flags → select a flag → Real-Time Metric Overview |
+| **SDK-level audit** | Per-evaluation detail (value, variant, reason, errorCode) via `getDetails()` | Your application code / API response |
+
+**Client-side vs Server-side:** For client-side SDKs (React, iOS, Android), flag evaluations are carried in **RUM sessions**. For server-side SDKs (Java, Node.js — our case), flag evaluations are carried in **APM traces**, so you can correlate variants with backend latency, error rates, and throughput.
 
 **Try it yourself:**
 
 ```bash
-# Get full flag audit for user-42
+# SDK-level audit — per-user evaluation details
 curl http://localhost:8080/api/user/user-42/flags
-
-# Compare with a different user
-curl http://localhost:8080/api/user/user-99/flags
+curl http://localhost:3000/api/user/user-99/flags
 ```
 
-**What to look for in the response:**
-- Each flag has `value`, `variant`, and `reason` fields
-- `reason: "TARGETING_MATCH"` means a targeting rule matched this user
-- `reason: "DEFAULT"` means no rule matched, so the default variant was served
-- `reason: "ERROR"` with `errorCode` means something went wrong (e.g., provider not ready)
+**Dashboard & expected results:**
+
+| Data Source | What to Check | Expected |
+|---|---|---|
+| SDK Response | `value`, `variant`, `reason` fields per flag | Each flag shows its evaluated variant and why |
+| APM Trace Explorer | `@ff.bright_mode:on service:ff-java-demo` | Traces filtered by variant show latency distribution |
+| OTel Metric (Node.js) | `feature_flag.evaluations{flag_key:bright_mode}` | Counter increments grouped by variant |
+| Custom Dashboard | Timeseries widgets | Variant distribution over time; compare Java (span tags) vs Node.js (OTel metric) |
 
 ---
 
@@ -238,9 +353,9 @@ curl http://localhost:8080/api/user/user-99/flags
 ```java
 client.getBooleanValue("some_flag", false)  // false is the fallback
 ```
-If the flag doesn't exist in Datadog, if the provider hasn't connected yet, or if any error occurs during evaluation, the SDK returns this fallback value instead of throwing an exception. The `getDetails()` call will additionally populate `errorCode` and `reason: "ERROR"` so you can detect and log these failures.
+If the flag doesn't exist, if the provider hasn't connected yet, or if any error occurs, the SDK returns this fallback value. The `getDetails()` call will additionally populate `errorCode` and `reason: "ERROR"` so you can detect these failures.
 
-**Why this matters:** In production, resilience is critical. If your feature flag service goes down, you don't want your app to crash or behave unpredictably. The fallback pattern ensures degraded-but-functional behavior. You choose sensible defaults (e.g., fallback to the legacy checkout flow) so users are never left with a broken experience.
+**Why this matters:** In production, resilience is critical. If your feature flag service goes down, you don't want your app to crash. The fallback pattern ensures degraded-but-functional behavior.
 
 **Try it yourself:**
 
@@ -249,23 +364,26 @@ If the flag doesn't exist in Datadog, if the provider hasn't connected yet, or i
 curl http://localhost:8080/api/fallback-test
 ```
 
-**What to look for in the response:**
-- `value: true` — the fallback value we specified in code
-- `reason: "ERROR"` — the SDK knows it couldn't evaluate properly
-- `error: "FLAG_NOT_FOUND"` or `"PROVIDER_NOT_READY"` — the specific failure reason
-- `variant: null` — no variant was selected since evaluation failed
+**Dashboard & expected results:**
 
-The `/api/theme` endpoint also demonstrates fallback behavior — if the `bright_mode` flag fails to evaluate, you'll see `error` and `note_q6` fields appear in the response.
+| Field | Expected Value | Meaning |
+|---|---|---|
+| `value` | `true` | The fallback value specified in code |
+| `reason` | `"ERROR"` | The SDK knows it couldn't evaluate properly |
+| `error` | `"FLAG_NOT_FOUND"` | The specific failure reason |
+| `variant` | `null` | No variant was selected since evaluation failed |
+
+The `/api/theme` endpoint also demonstrates fallback — if `bright_mode` fails to evaluate, the `error` and `note_q6` fields appear in the response. In the dashboard, error evaluations appear as a separate category (reason = ERROR).
 
 ---
 
 ### Q7: Are server-side flags affected by RUM sample rate?
 
-> **Short answer: No.** Server-side flag evaluation is completely independent of client-side RUM (Real User Monitoring) sampling.
+> **Short answer: No.** Server-side flag evaluation is completely independent of client-side RUM sampling.
 
-**How it works:** RUM sampling controls what percentage of browser/mobile sessions send telemetry data to Datadog. If your RUM sample rate is 10%, only 10% of user sessions report performance data, errors, etc. However, feature flag evaluation happens on the **server side** — it runs in your backend code on every single API request, regardless of whether the client's RUM session is being sampled or not.
+**How it works:** RUM sampling controls what percentage of browser/mobile sessions send telemetry to Datadog. However, feature flag evaluation happens on the **server side** — it runs in your backend code on every single API request, regardless of whether the client's RUM session is being sampled.
 
-**Why this matters:** This is a common source of confusion. Teams worry that if they set a low RUM sample rate (to save costs), their feature flags will also only work for the sampled sessions. That's not the case:
+**Why this matters:** This is a common source of confusion. Teams worry that a low RUM sample rate will affect feature flags. That's not the case:
 - **RUM sampling** affects observability data collection (sessions, views, actions)
 - **Feature flag evaluation** affects application behavior (which code path to execute)
 
@@ -277,80 +395,49 @@ These are two completely separate systems. Every user gets the correct flag valu
 curl http://localhost:8080/api/cart
 ```
 
-**What to look for in the response:**
-- `max_cart_items: 20` (or 50 if you changed the flag) — this value is served on **every** request
-- The `note` field explains the independence from RUM sampling
+**Dashboard & expected results:**
+
+| Field | Expected Value | Meaning |
+|---|---|---|
+| `max_cart_items` | `20` (default) or `50` (if changed) | Served on **every** request regardless of RUM |
+| Dashboard | Consistent evaluation count | Flag evaluations happen at 100% rate even if RUM is sampled at 10% |
 
 ---
 
-### Q9: How do A/B tests work with string flags?
-
-> **Short answer:** Use a string-type flag with multiple named variants (e.g., `"control"`, `"treatment_a"`, `"treatment_b"`). The `targetingKey` provides consistent bucketing so each user always sees the same variant.
-
-**How it works:** Unlike boolean flags (on/off), string flags can have any number of named variants. You configure the percentage allocation in the Datadog UI (e.g., 33% control, 33% treatment_a, 34% treatment_b). When the server evaluates the flag, it hashes the `targetingKey` to deterministically assign the user to one of the variants. Your application code then uses the returned string to decide which experience to render.
-
-```
-variant = evaluate("checkout_variant", userId)
-
-if variant == "treatment_a":   → single-page layout, "Buy Now" button
-if variant == "treatment_b":   → multi-step layout, "Continue to Payment" button
-else (control):                → classic layout, "Proceed to Checkout" button
-```
-
-**Why this matters:** A/B testing requires:
-1. **Consistent assignment** — a user must always see the same variant (stickiness via targetingKey)
-2. **Multiple variants** — not just on/off, but several different experiences
-3. **Measurable** — Datadog can correlate flag variants with performance metrics, error rates, and business outcomes
-
-String flags give you all three. You can run sophisticated experiments with more than two variants and analyze the results in Datadog's Feature Flags UI alongside your APM traces and RUM data.
-
-**Try it yourself:**
-
-```bash
-# user-42 always gets the same variant
-curl -X POST http://localhost:8080/api/ab-test \
-  -H "Content-Type: application/json" \
-  -d '{"userId": "user-42"}'
-
-# user-99 might get a different variant
-curl -X POST http://localhost:8080/api/ab-test \
-  -H "Content-Type: application/json" \
-  -d '{"userId": "user-99"}'
-
-# Try more users to see the distribution
-curl -X POST http://localhost:8080/api/ab-test \
-  -H "Content-Type: application/json" \
-  -d '{"userId": "user-123"}'
-```
-
-**What to look for in the response:**
-- `variant: "control"` / `"treatment_a"` / `"treatment_b"` — which bucket the user landed in
-- `experience.layout` and `experience.cta` — the actual UI differences per variant
-- `reason: "TARGETING_MATCH"` — shows the assignment came from a targeting rule, not just a default
-
----
-
-### Q10: Where does the evaluation context come from?
+### Q8: Where does the evaluation context come from?
 
 > **Short answer:** It's entirely up to your application. The evaluation context is a bag of key-value attributes that your server-side code constructs from whatever source makes sense — HTTP headers, query parameters, request body, JWT claims, database lookups, etc.
 
-**How it works:** Before evaluating a flag, your app builds an `EvaluationContext` object. The most important field is `targetingKey` (used for stickiness/bucketing), but you can add any custom attributes you want. These attributes are then available for Datadog targeting rules to match against.
+**How it works:** Before evaluating a flag, your app builds an `EvaluationContext` object. The most important field is `targetingKey` (used for stickiness/bucketing), but you can add any custom attributes. These attributes are then available for Datadog targeting rules to match against.
 
-Common context sources:
-| Source | Example | Use case |
-|---|---|---|
-| HTTP headers | `X-User-Id`, `X-User-City` | Set by API gateway, CDN, or client |
-| Query parameters | `?userId=bob&tier=enterprise` | Quick testing, debugging |
-| Request body | `{"userId": "alice"}` | POST payloads |
-| JWT claims | `sub`, `role`, `org_id` | Authentication tokens |
-| Database lookup | User profile, subscription tier | Enriched user data |
+**Evaluation context in detail:**
 
-**Why this matters:** The flexibility of the context model means you can target flags on **any** attribute. For example:
+The `EvaluationContext` is the bridge between your application's request data and the feature flag system. It consists of:
+
+1. **`targetingKey`** (required for stickiness) — a stable identifier for the entity being evaluated. Typically a user ID, but could be a session ID, organization ID, or device ID depending on your use case. This key is hashed for consistent variant assignment.
+
+2. **Custom attributes** — any key-value pairs your app provides. The Datadog provider makes these available for targeting rules. Common patterns:
+
+| Source | How to Extract | Example Attributes | Use Case |
+|---|---|---|---|
+| HTTP headers | `req.headers["X-User-Id"]` | `targetingKey`, `city`, `country` | Set by API gateway, CDN, or client app |
+| Query parameters | `req.query.userId` | `targetingKey`, `tier` | Quick testing, debugging |
+| Request body | `req.body.userId` | `targetingKey`, `plan` | POST payloads (e.g., checkout) |
+| JWT claims | Decode `Authorization` header | `sub` (targetingKey), `role`, `org_id` | Authentication tokens |
+| Database lookup | Query user profile | `subscription_tier`, `signup_date` | Enriched user data for progressive rollouts |
+
+3. **How targeting rules use context:** In the Datadog Feature Flags UI, you define rules like:
+   - "IF `city` == `Bangkok` THEN serve `on`" (geographic targeting, Q4)
+   - "IF `tier` == `premium` THEN serve `enabled`" (tier-based rollout)
+   - "IF `targetingKey` is in list THEN serve `treatment_a`" (user allowlist)
+
+   The provider evaluates these rules locally using the context your app provides. No context attributes means only the default variant is served.
+
+**Why this matters:** The flexibility of the context model means you can target flags on **any** attribute. There's no rigid schema — your app decides what context to provide, and your Datadog targeting rules decide how to use it. This enables:
 - Target by subscription tier ("premium users get the new feature first")
 - Target by organization ("Company X opted into the beta")
 - Target by custom attributes ("users who signed up after 2024 get the redesign")
-
-There's no rigid schema — your app decides what context to provide, and your Datadog targeting rules decide how to use it.
+- Combine multiple attributes in a single rule for precise targeting
 
 **Try it yourself:**
 
@@ -369,11 +456,15 @@ curl "http://localhost:8080/api/context-demo?userId=bob&tier=free" \
   -H "X-User-Tier: premium"
 ```
 
-**What to look for in the response:**
-- `from_headers` — flag evaluation using context built from HTTP headers (alice, premium)
-- `from_query_params` — flag evaluation using context built from query params (bob, enterprise)
-- Both evaluations happen in the same request, showing that context is per-evaluation, not per-request
-- Different targetingKeys may resolve to different flag values depending on your targeting rules
+**Dashboard & expected results:**
+
+| Context Source | `targetingKey` | `tier` | `bright_mode` Result | Why |
+|---|---|---|---|---|
+| Headers only | `alice` | `premium` | Depends on targeting rules | Hash of "alice" determines variant |
+| Query params only | `bob` | `enterprise` | Depends on targeting rules | Hash of "bob" determines variant |
+| Both (same request) | `alice` (headers) / `bob` (params) | `premium` / `free` | Two separate evaluations in one request | Each evaluation uses its own context independently |
+
+In APM Trace Explorer, you can see both evaluations on the same trace span, each with its own context and result. This demonstrates that evaluation context is per-call, not per-request.
 
 ---
 
@@ -387,9 +478,29 @@ For a live demo, use this flow:
 4. **Show instant update:** `curl localhost:8080/api/health` → bright_mode = true (no restart!)
 5. **Show stickiness:** POST to `/api/checkout` with same userId twice → same result
 6. **Show geo targeting:** `/api/promotions` with/without Bangkok header
-7. **Show A/B test:** `/api/ab-test` with different userIds
-8. **Show audit:** `/api/user/user-42/flags` for full evaluation details
-9. **Show fallback:** `/api/fallback-test` for missing flag behavior
+7. **Show audit:** `/api/user/user-42/flags` for full evaluation details
+8. **Show fallback:** `/api/fallback-test` for missing flag behavior
+9. **Show context:** `/api/context-demo` with different header/query param combos
+10. **Open dashboard:** Show variant distribution across all scenarios
+
+---
+
+## Colima Users (Docker Desktop Alternative)
+
+If you're using [Colima](https://github.com/abiosoft/colima) instead of Docker Desktop on macOS:
+
+```bash
+# Start Colima
+colima start
+
+# Set the Docker socket path for docker-compose
+export DOCKER_HOST_SOCK=$(colima status 2>&1 | grep -o '/[^ ]*docker.sock' || echo "$HOME/.colima/default/docker.sock")
+
+# Then run as normal
+docker-compose up --build
+```
+
+The `docker-compose.yml` automatically uses `${DOCKER_HOST_SOCK:-/var/run/docker.sock}` for the Agent's Docker socket volume mount.
 
 ---
 
@@ -429,3 +540,4 @@ datadog-ff-server-demo/
 | Tracing | dd-java-agent (javaagent) | dd-trace (--require dd-trace/init) |
 | Feature Flags | OpenFeature SDK + Datadog provider | OpenFeature Server SDK + dd-trace provider |
 | Build | Gradle | TypeScript → tsc |
+| Flag Observability | APM span tags (`ff.*`) | APM span tags (`ff.*`) + `feature_flag.evaluations` OTel metric |
