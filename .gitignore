@@ -24,3 +24,6 @@ nodejs-bun/package-lock.json
 # Docker
 .server.log
 .server.pid
+
+# Internal articles (not for repo)
+blog-*

@@ -196,14 +196,59 @@ After running several curls with different flag states, the dashboard timeseries
 
 ### Q2: How does stickiness work?
 
-> **Short answer:** The `targetingKey` (typically the user ID) is hashed to deterministically assign a variant. The same user always gets the same result.
+> **Short answer:** The `targetingKey` (typically the user ID) is hashed together with the flag key to deterministically assign a variant. The same user always gets the same result — no session storage, cookies, or databases needed.
 
-**How it works:** When you pass a `targetingKey` (e.g., a user ID like `"user-42"`) in the evaluation context, the Datadog provider uses consistent hashing to map that key to a variant. This means:
-- `user-42` will **always** get the same variant (e.g., `enabled`) no matter how many times the flag is evaluated.
-- `user-99` might get a different variant, but it will also be **stable** across repeated evaluations.
-- This is deterministic — no session storage, cookies, or databases are needed.
+**How it works — evaluation, context, and randomization:**
 
-**Why this matters:** For gradual rollouts and experiments, you need users to have a consistent experience. Without stickiness, a user could see the new checkout flow on one request and the old one on the next.
+An **evaluation** is one call to resolve a flag for a given subject and context (e.g., `client.getBooleanValue("new_checkout", false, ctx)`). Each evaluation is the atomic unit tracked in telemetry (`feature_flag.evaluations` metric and APM span tags).
+
+Before evaluating, your app builds an **evaluation context** — a bag of key-value attributes describing the subject and environment:
+
+```json
+{
+  "targetingKey": "user-42",
+  "plan": "premium",
+  "city": "Bangkok",
+  "service": "ff-java-demo",
+  "env": "production"
+}
+```
+
+The context has two roles:
+1. **Targeting rules** read from these attributes to decide *which allocation matches* (e.g., "IF plan == premium THEN 100% → enabled").
+2. **Randomization** uses one specific attribute (by default `targetingKey`) to deterministically assign the subject to a variant within that allocation.
+
+**The randomization key** is the attribute whose value is fed into the hashing function. By default, `randomization key = targetingKey`. The engine computes:
+
+```
+bucket = hash(targetingKey, flag_key) → stable bucket → stable variant
+```
+
+This means:
+- `user-42` will **always** get the same variant for `new_checkout`, no matter how many times the flag is evaluated, across any number of requests, sessions, or devices.
+- `user-99` might get a different variant, but it is also **stable** across all evaluations.
+- Changing non-randomization attributes (e.g., `plan`, `city`) does **not** change the variant — only rules that reference those attributes or a change in `targetingKey` can change the assignment.
+
+**When does the variant change?**
+
+| What Changed | Variant Changes? | Why |
+|---|---|---|
+| Nothing — same user, same rules | No | `hash(targetingKey, flag_key)` is deterministic |
+| Non-randomization context attribute (e.g., `city`, `plan`) | No | These attributes are not used in the hash; only targeting rule eligibility may change |
+| `targetingKey` value (different user) | Possibly | Different hash input → different bucket → may land on different variant |
+| Allocation percentages in the UI (e.g., 50% → 80%) | Possibly | More buckets now map to the variant; some users who were "off" become "on" |
+| Targeting rule changed to match a different allocation | Yes | The user now matches a different rule with different variant weights |
+| Randomization key explicitly changed to a different attribute | Yes | Hash input changes → different bucket assignment |
+
+**Typical `targetingKey` choices:**
+
+| Context | Typical `targetingKey` | Use Case |
+|---|---|---|
+| Browser / mobile (client-side) | RUM device ID or user ID | Per-user stickiness across sessions |
+| Backend API (server-side) | `user_id` or `org_id` as string | Per-user or per-organization rollouts |
+| Infrastructure rollout | `hostname` or `service_id` | Per-host or per-service canary |
+
+**Why this matters:** For gradual rollouts and experiments, you need users to have a consistent experience. Without stickiness, a user could see the new checkout flow on one request and the old one on the next — corrupting experiment data and confusing users. The deterministic hash approach guarantees stability without any external state.
 
 **Try it yourself:**
 
@@ -217,6 +262,11 @@ curl -X POST http://localhost:8080/api/checkout \
 curl -X POST http://localhost:8080/api/checkout \
   -H "Content-Type: application/json" \
   -d '{"userId": "user-99", "plan": "basic"}'
+
+# Same user, different plan — variant stays the same (plan is not the randomization key)
+curl -X POST http://localhost:8080/api/checkout \
+  -H "Content-Type: application/json" \
+  -d '{"userId": "user-42", "plan": "basic"}'
 ```
 
 **Dashboard & expected results:**
@@ -224,10 +274,11 @@ curl -X POST http://localhost:8080/api/checkout \
 | User | Repeated Calls | Expected `new_checkout` | Dashboard Signal |
 |---|---|---|---|
 | `user-42` | 5x | Same variant every time (e.g., `enabled`) | All 5 traces show `ff.new_checkout:enabled` |
+| `user-42` (different `plan`) | 3x | Still the same variant — `plan` is not the randomization key | Same `ff.new_checkout` value as above |
 | `user-99` | 5x | Same variant every time (may differ from user-42) | All 5 traces show consistent variant |
 | `user-1` through `user-20` | 1x each | ~50/50 split (with 50% rollout) | Dashboard pie/bar chart shows variant distribution |
 
-The dashboard's "new_checkout variant distribution" widget should show a roughly even split when you test with many different user IDs and a 50% rollout is configured.
+The dashboard's "new_checkout variant distribution" widget should show a roughly even split when you test with many different user IDs and a 50% rollout is configured. The key insight: variant assignment is stable per `targetingKey` regardless of what other context attributes change between requests.
 
 ---
 
