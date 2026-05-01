@@ -34,29 +34,31 @@ The fundamental difference between client-side and server-side feature flags is 
 CLIENT-SIDE (Web / Mobile)                SERVER-SIDE (Backend)
 ──────────────────────────                ──────────────────────────
 
-                                            ┌──────────┐
-  ┌──────────┐  1. context  ┌──────────┐    │ Datadog  │
-  │  Browser  │────────────►│ Datadog  │    │ Remote   │
-  │  or       │             │  Edge    │    │ Config   │
-  │  Mobile   │◄────────────│          │    └────┬─────┘
-  │  App      │ 2. variants │          │         │ 1. Agent polls
-  └──────────┘              └──────────┘         │    for config
-                                                 ▼
-  SDK sends context              ┌──────────────────────────┐
-  Edge evaluates                 │     Datadog Agent        │
-  Edge returns variants          │     (local, port 8126)   │
-                                 └────────────┬─────────────┘
-                                              │ 2. Pushes flag
-                                              │    config down
-                                              ▼
-                                 ┌──────────────────────────┐
-                                 │     Your App             │
-                                 │     (tracer + OpenFeature│
-                                 │      provider)           │
-                                 │                          │
-                                 │  3. App evaluates flags  │
-                                 │     locally in-memory    │
-                                 └──────────────────────────┘
+                                          ┌──────────────────────────┐
+  ┌──────────┐  1. context  ┌──────────┐  │     Datadog Agent        │
+  │  Browser  │────────────►│ Datadog  │  │     (local, port 8126)   │
+  │  or       │             │  Edge    │  └──────┬──────────▲────────┘
+  │  Mobile   │◄────────────│          │    1. poll│         │2. config
+  │  App      │ 2. variants │          │         ▼          │  response
+  └──────────┘              └──────────┘  ┌──────────────────┴───────┐
+                                          │     Datadog Remote       │
+  SDK sends context                       │     Config (cloud)       │
+  Edge evaluates                          └──────────────────────────┘
+  Edge returns variants
+                                          ┌──────────────────────────┐
+                                          │     Datadog Agent        │
+                                          └──────────────┬───────────┘
+                                              3. Pushes flag│
+                                                 config down│
+                                                            ▼
+                                          ┌──────────────────────────┐
+                                          │     Your App             │
+                                          │     (tracer + OpenFeature│
+                                          │      provider)           │
+                                          │                          │
+                                          │  4. App evaluates flags  │
+                                          │     locally in-memory    │
+                                          └──────────────────────────┘
 ```
 
 #### Client-side flow (browser / mobile)
@@ -69,10 +71,11 @@ CLIENT-SIDE (Web / Mobile)                SERVER-SIDE (Backend)
 
 #### Server-side flow (this demo)
 
-1. **Datadog Agent polls Remote Config** — the Agent sends requests to Datadog's Remote Config service and receives the org's flag configuration (default interval: 60s, configurable)
-2. **Agent pushes flag rules to the tracer** — the OpenFeature provider inside your app keeps rules in local memory
-3. **App builds evaluation context** — `targetingKey`, `org_id`, `plan`, `city`, etc.
-4. **App evaluates locally in-process** — `client.getBooleanValue("my-flag", false, ctx)` resolves using cached rules, zero network latency per evaluation
+1. **Agent polls Remote Config** — the Agent sends a request **to** Datadog's Remote Config service asking for the latest flag configuration
+2. **Remote Config responds with flag config** — the Agent receives the org's flag rules (default poll interval: 60s, configurable)
+3. **Agent pushes flag rules to the tracer** — the OpenFeature provider inside your app keeps rules in local memory
+4. **App builds evaluation context** — `targetingKey`, `org_id`, `plan`, `city`, etc.
+5. **App evaluates locally in-process** — `client.getBooleanValue("my-flag", false, ctx)` resolves using cached rules, zero network latency per evaluation
 5. **Telemetry** — aggregated `feature_flag.evaluations` OTel metrics + APM span tags are emitted for observability (no evaluation context is sent to Datadog per-call)
 
 #### Key differences summarized
