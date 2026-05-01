@@ -8,6 +8,100 @@ Both apps instrument flag evaluations for observability via:
 
 > **Custom Dashboard:** This demo includes a custom Datadog dashboard that combines both data sources to visualize flag variant distribution, evaluation counts, and cross-service comparisons. See [Observability & Dashboard Setup](#observability--dashboard-setup) below.
 
+---
+
+## How Feature Flags Work
+
+### Key Terminology
+
+| Term | Definition |
+|---|---|
+| **Flag key** | Unique string identifier for a flag (e.g., `"bright_mode"`). Passed into SDK calls and used in metrics as `feature_flag.key`. |
+| **Variant** | The concrete value a flag returns for a given evaluation — boolean `true`/`false`, string `"on"`/`"off"`, number, or JSON. Recorded as `feature_flag.result.variant`. |
+| **Evaluation** | One call to resolve a flag for a given subject + context (e.g., `client.getBooleanValue("my-flag", false, ctx)`). This is the atomic unit counted by `feature_flag.evaluations`. |
+| **Evaluation context** | A bag of attributes describing the subject and environment at evaluation time — `user_id`, `org_id`, `city`, `device_type`, `service`, `env`, etc. Targeting rules match against these attributes. |
+| **Targeting key** | A special string in the evaluation context that uniquely identifies the "subject" (user, device, org). Used for deterministic percentage rollouts so the same subject always gets the same variant. |
+| **Randomization key** | The attribute fed into the hashing function for percentage-based bucketing. Defaults to `targetingKey` if not explicitly configured. `hash(randomizationKey, flagKey) → bucket → variant`. |
+| **Targeting rules** | Configuration in the Feature Flags UI that decides who is eligible and what variant they see. Conditions are expressed over **evaluation context attributes** (e.g., `city == "Bangkok"`, `org_id IN [2,3]`). |
+| **Allocation** | Internal unit combining targeting rules + exposure percentage + variant weights. A flag can have multiple allocations evaluated in order until one matches. |
+| **Default value** | Fallback value provided in every SDK call. If evaluation fails (flag not found, provider error), the SDK returns this default. |
+
+### Client-Side vs. Server-Side: Communication Direction
+
+The fundamental difference between client-side and server-side feature flags is **where evaluation happens** and **how flag configuration flows**.
+
+```
+CLIENT-SIDE (Web / Mobile)                    SERVER-SIDE (Backend)
+─────────────────────────────                 ──────────────────────────
+
+  ┌──────────┐    context     ┌──────────┐     ┌──────────┐  poll RC   ┌──────────┐
+  │  Browser  │──────────────►│ Datadog  │     │ Datadog  │◄──────────│ Datadog  │
+  │  or       │               │  Edge    │     │  Agent   │           │ Backend  │
+  │  Mobile   │◄──────────────│ (Fastly) │     │ (local)  │──────────►│ (Remote  │
+  │  App      │   variants    │          │     │          │  config   │  Config) │
+  └──────────┘                └──────────┘     └────┬─────┘           └──────────┘
+                                                    │ push config
+       SDK sends context                            ▼
+       Edge evaluates                          ┌──────────┐
+       Edge returns variants               │  Your App │
+                                                    │ (tracer + │
+                                                    │ OpenFeature│
+                                                    │  provider) │
+                                                    └──────────┘
+                                                    App evaluates
+                                                    locally in-memory
+```
+
+#### Client-side flow (browser / mobile)
+
+1. **SDK builds evaluation context** — attributes like `targetingKey`, `city`, `device_type`, `language`
+2. **SDK sends context to Datadog's edge** (Fastly Compute) along with the flag keys
+3. **Edge evaluates** — loads cached flag configuration, applies targeting rules against context attributes, uses randomization key for percentage rollouts
+4. **Edge returns only the evaluated variants** to the SDK — no flag configuration is exposed to the client
+5. **Telemetry** — evaluations are logged as RUM events (`flagevaluation` EVP track), tied to RUM sessions
+6. **Billing** — each SDK initialization / context change generates a Monthly Flag Configuration Request (MFCR); repeated evaluations within a session use cached config
+
+#### Server-side flow (this demo)
+
+1. **Datadog Agent polls Remote Config** for the org's flag configuration (default interval: 60s, configurable)
+2. **Agent pushes flag rules to the tracer** — the OpenFeature provider keeps rules in local memory
+3. **App builds evaluation context** — `targetingKey`, `org_id`, `plan`, `city`, etc.
+4. **App evaluates locally in-process** — `client.getBooleanValue("my-flag", false, ctx)` resolves using cached rules, zero network latency per evaluation
+5. **Telemetry** — aggregated `feature_flag.evaluations` OTel metrics + APM span tags are emitted for observability (no evaluation context is sent to Datadog per-call)
+6. **Billing** — MFCRs are per configuration download; all local evaluations are effectively free
+
+#### Key differences summarized
+
+| Aspect | Client-Side | Server-Side |
+|---|---|---|
+| **Where evaluation happens** | Datadog's edge (Fastly) | In your app process (local memory) |
+| **Config delivery** | Edge caches config; SDK fetches on init/context change | Agent polls Remote Config → pushes to tracer |
+| **Network per evaluation** | Yes — SDK calls edge | No — fully local, zero latency |
+| **Context sent to Datadog** | Yes — on every config fetch | No — only aggregated metrics/traces |
+| **Telemetry** | RUM sessions + `flagevaluation` EVP track | APM span tags + `feature_flag.evaluations` OTel metric |
+| **Session-level correlation** | Built-in — tied to RUM sessions | Not built-in — request/trace level only |
+| **Flag config visibility** | Config stays at edge; only variants returned | Full config cached in-process |
+
+### How Targeting Rules Use Context (Not the Randomization Key)
+
+A common point of confusion: **targeting rules** and **randomization** are two separate steps in the evaluation pipeline.
+
+```
+Step 1: TARGETING RULES (filter)          Step 2: RANDOMIZATION (bucket)
+─────────────────────────────────         ──────────────────────────────
+Uses: evaluation context attributes       Uses: randomization key (default: targetingKey)
+
+"IF city == Bangkok AND env == prod"  →   "Of matched traffic, 50% get variant A"
+                                          hash(targetingKey, flagKey) → bucket
+```
+
+- **Targeting rules** (configured in the Feature Flags UI as "New targeting rule") evaluate conditions against **evaluation context attributes** like `city`, `org_id`, `env`, `plan`. These decide *which allocation matches*.
+- **Randomization** uses the **randomization key** (defaults to `targetingKey`) to deterministically hash and assign the matched subject to a variant at the configured percentage. This decides *which variant within the matched allocation*.
+
+Changing a non-randomization context attribute (e.g., `city`) does **not** change the variant unless a targeting rule references that attribute and causes the subject to match a different allocation.
+
+---
+
 ## Prerequisites
 
 | Requirement | Notes |
@@ -516,42 +610,6 @@ curl "http://localhost:8080/api/context-demo?userId=bob&tier=free" \
 | Both (same request) | `alice` (headers) / `bob` (params) | `premium` / `free` | Two separate evaluations in one request | Each evaluation uses its own context independently |
 
 In APM Trace Explorer, you can see both evaluations on the same trace span, each with its own context and result. This demonstrates that evaluation context is per-call, not per-request.
-
----
-
-## Live Demo Script
-
-For a live demo, use this flow:
-
-1. **Start services:** `docker-compose up --build`
-2. **Show health endpoint:** `curl localhost:8080/api/health` → bright_mode = false
-3. **Toggle flag live:** `./scripts/toggle-bright-mode.sh on`
-4. **Show instant update:** `curl localhost:8080/api/health` → bright_mode = true (no restart!)
-5. **Show stickiness:** POST to `/api/checkout` with same userId twice → same result
-6. **Show geo targeting:** `/api/promotions` with/without Bangkok header
-7. **Show audit:** `/api/user/user-42/flags` for full evaluation details
-8. **Show fallback:** `/api/fallback-test` for missing flag behavior
-9. **Show context:** `/api/context-demo` with different header/query param combos
-10. **Open dashboard:** Show variant distribution across all scenarios
-
----
-
-## Colima Users (Docker Desktop Alternative)
-
-If you're using [Colima](https://github.com/abiosoft/colima) instead of Docker Desktop on macOS:
-
-```bash
-# Start Colima
-colima start
-
-# Set the Docker socket path for docker-compose
-export DOCKER_HOST_SOCK=$(colima status 2>&1 | grep -o '/[^ ]*docker.sock' || echo "$HOME/.colima/default/docker.sock")
-
-# Then run as normal
-docker-compose up --build
-```
-
-The `docker-compose.yml` automatically uses `${DOCKER_HOST_SOCK:-/var/run/docker.sock}` for the Agent's Docker socket volume mount.
 
 ---
 
