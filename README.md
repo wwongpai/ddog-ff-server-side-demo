@@ -31,54 +31,59 @@ Both apps instrument flag evaluations for observability via:
 The fundamental difference between client-side and server-side feature flags is **where evaluation happens** and **how flag configuration flows**.
 
 ```
-CLIENT-SIDE (Web / Mobile)                    SERVER-SIDE (Backend)
-─────────────────────────────                 ──────────────────────────
+CLIENT-SIDE (Web / Mobile)                SERVER-SIDE (Backend)
+──────────────────────────                ──────────────────────────
 
-  ┌──────────┐    context     ┌──────────┐     ┌──────────┐  poll RC   ┌──────────┐
-  │  Browser  │──────────────►│ Datadog  │     │ Datadog  │◄──────────│ Datadog  │
-  │  or       │               │  Edge    │     │  Agent   │           │ Backend  │
-  │  Mobile   │◄──────────────│ (Fastly) │     │ (local)  │──────────►│ (Remote  │
-  │  App      │   variants    │          │     │          │  config   │  Config) │
-  └──────────┘                └──────────┘     └────┬─────┘           └──────────┘
-                                                    │ push config
-       SDK sends context                            ▼
-       Edge evaluates                          ┌──────────┐
-       Edge returns variants               │  Your App │
-                                                    │ (tracer + │
-                                                    │ OpenFeature│
-                                                    │  provider) │
-                                                    └──────────┘
-                                                    App evaluates
-                                                    locally in-memory
+                                            ┌──────────┐
+  ┌──────────┐  1. context  ┌──────────┐    │ Datadog  │
+  │  Browser  │────────────►│ Datadog  │    │ Remote   │
+  │  or       │             │  Edge    │    │ Config   │
+  │  Mobile   │◄────────────│          │    └────┬─────┘
+  │  App      │ 2. variants │          │         │ 1. Agent polls
+  └──────────┘              └──────────┘         │    for config
+                                                 ▼
+  SDK sends context              ┌──────────────────────────┐
+  Edge evaluates                 │     Datadog Agent        │
+  Edge returns variants          │     (local, port 8126)   │
+                                 └────────────┬─────────────┘
+                                              │ 2. Pushes flag
+                                              │    config down
+                                              ▼
+                                 ┌──────────────────────────┐
+                                 │     Your App             │
+                                 │     (tracer + OpenFeature│
+                                 │      provider)           │
+                                 │                          │
+                                 │  3. App evaluates flags  │
+                                 │     locally in-memory    │
+                                 └──────────────────────────┘
 ```
 
 #### Client-side flow (browser / mobile)
 
 1. **SDK builds evaluation context** — attributes like `targetingKey`, `city`, `device_type`, `language`
-2. **SDK sends context to Datadog's edge** (Fastly Compute) along with the flag keys
+2. **SDK sends context to Datadog's edge** along with the flag keys
 3. **Edge evaluates** — loads cached flag configuration, applies targeting rules against context attributes, uses randomization key for percentage rollouts
 4. **Edge returns only the evaluated variants** to the SDK — no flag configuration is exposed to the client
-5. **Telemetry** — evaluations are logged as RUM events (`flagevaluation` EVP track), tied to RUM sessions
-6. **Billing** — each SDK initialization / context change generates a Monthly Flag Configuration Request (MFCR); repeated evaluations within a session use cached config
+5. **Telemetry** — evaluations are logged as RUM events, tied to RUM sessions
 
 #### Server-side flow (this demo)
 
-1. **Datadog Agent polls Remote Config** for the org's flag configuration (default interval: 60s, configurable)
-2. **Agent pushes flag rules to the tracer** — the OpenFeature provider keeps rules in local memory
+1. **Datadog Agent polls Remote Config** — the Agent sends requests to Datadog's Remote Config service and receives the org's flag configuration (default interval: 60s, configurable)
+2. **Agent pushes flag rules to the tracer** — the OpenFeature provider inside your app keeps rules in local memory
 3. **App builds evaluation context** — `targetingKey`, `org_id`, `plan`, `city`, etc.
 4. **App evaluates locally in-process** — `client.getBooleanValue("my-flag", false, ctx)` resolves using cached rules, zero network latency per evaluation
 5. **Telemetry** — aggregated `feature_flag.evaluations` OTel metrics + APM span tags are emitted for observability (no evaluation context is sent to Datadog per-call)
-6. **Billing** — MFCRs are per configuration download; all local evaluations are effectively free
 
 #### Key differences summarized
 
 | Aspect | Client-Side | Server-Side |
 |---|---|---|
-| **Where evaluation happens** | Datadog's edge (Fastly) | In your app process (local memory) |
+| **Where evaluation happens** | Datadog's edge service | In your app process (local memory) |
 | **Config delivery** | Edge caches config; SDK fetches on init/context change | Agent polls Remote Config → pushes to tracer |
 | **Network per evaluation** | Yes — SDK calls edge | No — fully local, zero latency |
 | **Context sent to Datadog** | Yes — on every config fetch | No — only aggregated metrics/traces |
-| **Telemetry** | RUM sessions + `flagevaluation` EVP track | APM span tags + `feature_flag.evaluations` OTel metric |
+| **Telemetry** | RUM sessions | APM span tags + `feature_flag.evaluations` OTel metric |
 | **Session-level correlation** | Built-in — tied to RUM sessions | Not built-in — request/trace level only |
 | **Flag config visibility** | Config stays at edge; only variants returned | Full config cached in-process |
 
